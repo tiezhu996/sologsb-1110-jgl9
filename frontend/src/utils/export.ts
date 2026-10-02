@@ -1,5 +1,8 @@
 import { db, SCHEMA_VERSION } from './db';
 
+/**
+ * 备份只含四张正式工序档案表；草稿是页签私有的未提交内容，不进入备份。
+ */
 export interface BackupPayload {
   app: string;
   schemaVersion: number;
@@ -8,6 +11,15 @@ export interface BackupPayload {
   chambers: unknown[];
   lacquers: unknown[];
   stringings: unknown[];
+}
+
+/** 旧版备份/历史数据没有乐观锁字段，按初版 version=1 兼容 */
+function withVersion<T>(rows: T[] | undefined): T[] {
+  return (rows ?? []).map((row) => {
+    const item = row as { version?: number };
+    if (typeof item.version !== 'number') item.version = 1;
+    return row;
+  });
 }
 
 /** 汇总全部本地表为 JSON 备份（schema 迁移前先导出） */
@@ -70,12 +82,17 @@ export async function importBackup(text: string): Promise<{ boards: number; cham
     lacquers: payload.lacquers?.length ?? 0,
     stringings: payload.stringings?.length ?? 0,
   };
-  await db.transaction('rw', db.boards, db.chambers, db.lacquers, db.stringings, async () => {
-    await Promise.all([db.boards.clear(), db.chambers.clear(), db.lacquers.clear(), db.stringings.clear()]);
-    if (payload.boards?.length) await db.boards.bulkPut(payload.boards as never[]);
-    if (payload.chambers?.length) await db.chambers.bulkPut(payload.chambers as never[]);
-    if (payload.lacquers?.length) await db.lacquers.bulkPut(payload.lacquers as never[]);
-    if (payload.stringings?.length) await db.stringings.bulkPut(payload.stringings as never[]);
+  const boards = withVersion(payload.boards as never[]);
+  const chambers = withVersion(payload.chambers as never[]);
+  const lacquers = withVersion(payload.lacquers as never[]);
+  const stringings = withVersion(payload.stringings as never[]);
+  // 恢复会整体替换正式档案；页签草稿引用的旧版本可能已失效，一并清空避免错配
+  await db.transaction('rw', db.boards, db.chambers, db.lacquers, db.stringings, db.drafts, async () => {
+    await Promise.all([db.boards.clear(), db.chambers.clear(), db.lacquers.clear(), db.stringings.clear(), db.drafts.clear()]);
+    if (boards.length) await db.boards.bulkPut(boards);
+    if (chambers.length) await db.chambers.bulkPut(chambers);
+    if (lacquers.length) await db.lacquers.bulkPut(lacquers);
+    if (stringings.length) await db.stringings.bulkPut(stringings);
   });
   return counts;
 }

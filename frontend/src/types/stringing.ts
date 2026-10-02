@@ -41,6 +41,8 @@ export interface Stringing {
   operator: string;
   /** 历次评语版本（倒序，最新在前） */
   noteVersions: ToneVersion[];
+  /** 乐观锁版本：正式档案每被改写一次 +1；初版旧数据按 1 计 */
+  version: number;
 }
 
 /** 三段评语 + 九德的编辑草稿 */

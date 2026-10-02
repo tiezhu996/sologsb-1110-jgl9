@@ -2,7 +2,11 @@ import { defineStore } from 'pinia';
 import { db } from '../utils/db';
 import { uid } from '../utils/id';
 import { toPlain } from '../utils/plain';
+import { subscribeTable } from '../utils/live';
+import { RECORD_FIELDS } from '../utils/records';
+import { checkCommit, resolveMerged, CommitFailedError, unresolvedConflicts } from '../utils/concurrency';
 import type { StringDefect, StringType, Stringing, ToneVersion } from '../types/stringing';
+import type { CommitCheck, DraftPayload, ProcessDraft } from '../types/draft';
 
 export interface StringingInput {
   guqinNo: string;
@@ -16,16 +20,20 @@ export interface StringingInput {
   defects: StringDefect[];
   strungAt?: string;
   operator: string;
-  /** 保存时是否记录一条评语历史版本（用于文字版本对照） */
-  keepVersion?: boolean;
 }
 
 interface StringingState {
+  /** 正式上弦档案（liveQuery 订阅，跨页签提交后自动同步） */
   stringings: Stringing[];
   hydrated: boolean;
 }
 
-/** 上弦与文字评语（纯文本，不做音频处理） */
+/** 认领键：每张琴一份上弦记录 */
+export function stringingResolveKey(guqinNo: string): string {
+  return guqinNo.trim();
+}
+
+/** 上弦与文字评语（纯文本，不做音频处理）；评语历史在提交落档时生成 */
 export const useStringingStore = defineStore('stringing', {
   state: (): StringingState => ({ stringings: [], hydrated: false }),
 
@@ -33,7 +41,7 @@ export const useStringingStore = defineStore('stringing', {
     byGuqin(state) {
       return (guqinNo: string): Stringing | undefined => state.stringings.find((s) => s.guqinNo === guqinNo);
     },
-    /** 三段评语 + 九德的文字检索 */
+    /** 三段评语 + 九德的文字检索（只检索正式档案，不含草稿） */
     search(state) {
       return (keyword: string): Stringing[] => {
         const kw = keyword.trim().toLowerCase();
@@ -52,77 +60,114 @@ export const useStringingStore = defineStore('stringing', {
   },
 
   actions: {
-    async hydrate() {
-      this.stringings = await db.stringings.orderBy('strungAt').reverse().toArray();
+    hydrate() {
+      const sub = subscribeTable(
+        () => db.stringings.orderBy('strungAt').reverse().toArray(),
+        (rows) => {
+          this.stringings = rows;
+        },
+      );
       this.hydrated = true;
+      return sub;
     },
 
-    async addStringing(input: StringingInput): Promise<Stringing> {
-      const stringing: Stringing = {
-        id: uid('stringing'),
-        guqinNo: input.guqinNo.trim(),
-        stringType: input.stringType,
-        nut: input.nut.trim(),
-        stringGap: Number(input.stringGap) || 0,
-        sanNote: input.sanNote.trim(),
-        anNote: input.anNote.trim(),
-        fanNote: input.fanNote.trim(),
-        nineVirtues: input.nineVirtues.trim(),
-        defects: input.defects.length ? input.defects : ['无'],
-        strungAt: input.strungAt ?? new Date().toISOString(),
-        operator: input.operator.trim(),
-        noteVersions: [],
-      };
-      await db.stringings.put(toPlain(stringing));
-      this.stringings = [stringing, ...this.stringings];
-      return stringing;
+    findTarget(draft: ProcessDraft): Stringing | undefined {
+      const byId = this.stringings.find((s) => s.id === draft.targetId);
+      if (byId || draft.existed) return byId;
+      const guqinNo = stringingResolveKey(String(draft.payload.guqinNo ?? ''));
+      return this.stringings.find((s) => stringingResolveKey(s.guqinNo) === guqinNo);
     },
 
-    /** 保存评语：如内容有变化且 keepVersion，则把改动前的评语存入历史版本 */
-    async updateStringing(id: string, patch: Partial<StringingInput>) {
-      const current = this.stringings.find((s) => s.id === id);
-      if (!current) return;
-      const notesChanged =
-        (patch.sanNote !== undefined && patch.sanNote.trim() !== current.sanNote) ||
-        (patch.anNote !== undefined && patch.anNote.trim() !== current.anNote) ||
-        (patch.fanNote !== undefined && patch.fanNote.trim() !== current.fanNote) ||
-        (patch.nineVirtues !== undefined && patch.nineVirtues.trim() !== current.nineVirtues);
+    prepareCommit(draft: ProcessDraft): { check: CommitCheck; current: Stringing | undefined } {
+      const current = this.findTarget(draft);
+      const base = draft.existed ? draft.baseSnapshot : null;
+      const theirs = current ? JSON.parse(JSON.stringify(current)) : null;
+      const check = checkCommit(base, draft.payload, theirs, RECORD_FIELDS.stringing);
+      return { check, current };
+    },
 
-      const versions = [...current.noteVersions];
-      if (notesChanged && patch.keepVersion !== false) {
-        const version: ToneVersion = {
-          id: uid('tone'),
-          savedAt: new Date().toISOString(),
-          sanNote: current.sanNote,
-          anNote: current.anNote,
-          fanNote: current.fanNote,
-          nineVirtues: current.nineVirtues,
+    /**
+     * 乐观锁提交。评语历史版本在落档瞬间依据正式档案现值生成：
+     * 只有最终写入的评语与档案现值不同，才把“改动前的正式评语”存入版本对照，
+     * 避免把未经确认的草稿中间态写进历史。
+     */
+    async commitDraft(
+      draft: ProcessDraft,
+      resolved: Record<string, 'mine' | 'theirs'> = {},
+    ): Promise<Stringing> {
+      const payload = draft.payload as unknown as StringingInput;
+      const buildRow = (fields: DraftPayload, version: number, prev?: Stringing): Stringing => {
+        const sanNote = String(fields.sanNote ?? '').trim();
+        const anNote = String(fields.anNote ?? '').trim();
+        const fanNote = String(fields.fanNote ?? '').trim();
+        const nineVirtues = String(fields.nineVirtues ?? '').trim();
+        const noteVersions = [...(prev?.noteVersions ?? [])];
+        const notesChanged =
+          prev &&
+          (sanNote !== prev.sanNote || anNote !== prev.anNote || fanNote !== prev.fanNote || nineVirtues !== prev.nineVirtues);
+        if (notesChanged && prev) {
+          const versionRow: ToneVersion = {
+            id: uid('tone'),
+            savedAt: new Date().toISOString(),
+            sanNote: prev.sanNote,
+            anNote: prev.anNote,
+            fanNote: prev.fanNote,
+            nineVirtues: prev.nineVirtues,
+          };
+          noteVersions.unshift(versionRow);
+        }
+        return {
+          id: prev?.id ?? draft.targetId,
+          guqinNo: String(fields.guqinNo ?? '').trim(),
+          stringType: fields.stringType as StringType,
+          nut: String(fields.nut ?? '').trim(),
+          stringGap: Number(fields.stringGap) || 0,
+          sanNote,
+          anNote,
+          fanNote,
+          nineVirtues,
+          defects: Array.isArray(fields.defects) && fields.defects.length ? (fields.defects as StringDefect[]) : ['无'],
+          strungAt: prev?.strungAt ?? String(fields.strungAt ?? new Date().toISOString()),
+          operator: String(fields.operator ?? '').trim(),
+          noteVersions,
+          version,
         };
-        versions.unshift(version);
-      }
-
-      const next: Stringing = {
-        ...current,
-        guqinNo: patch.guqinNo?.trim() ?? current.guqinNo,
-        stringType: patch.stringType ?? current.stringType,
-        nut: patch.nut?.trim() ?? current.nut,
-        stringGap: patch.stringGap !== undefined ? Number(patch.stringGap) : current.stringGap,
-        sanNote: patch.sanNote?.trim() ?? current.sanNote,
-        anNote: patch.anNote?.trim() ?? current.anNote,
-        fanNote: patch.fanNote?.trim() ?? current.fanNote,
-        nineVirtues: patch.nineVirtues?.trim() ?? current.nineVirtues,
-        defects: patch.defects?.length ? patch.defects : current.defects,
-        strungAt: patch.strungAt ?? current.strungAt,
-        operator: patch.operator?.trim() ?? current.operator,
-        noteVersions: versions,
       };
-      await db.stringings.put(toPlain(next));
-      this.stringings = this.stringings.map((s) => (s.id === id ? next : s));
+
+      return db.transaction('rw', db.stringings, async () => {
+        const all = await db.stringings.toArray();
+        const byId = all.find((s) => s.id === draft.targetId);
+        const byKey = !draft.existed
+          ? all.find((s) => stringingResolveKey(s.guqinNo) === stringingResolveKey(String(payload.guqinNo)))
+          : undefined;
+        const current = byId ?? byKey;
+
+        const base = draft.existed ? draft.baseSnapshot : null;
+        const theirs = current ? JSON.parse(JSON.stringify(current)) : null;
+        const check = checkCommit(base, draft.payload, theirs, RECORD_FIELDS.stringing);
+
+        if (unresolvedConflicts(check, resolved).length) {
+          throw new CommitFailedError(check, 'conflict');
+        }
+        if (draft.existed && !current) {
+          throw new CommitFailedError(check, 'deleted');
+        }
+
+        const fields = resolveMerged(draft.payload, theirs, check, resolved);
+        const nextVersion = current ? (current.version ?? 1) + 1 : 1;
+        const row = buildRow(fields, nextVersion, current);
+        await db.stringings.put(toPlain(row));
+        return row;
+      });
     },
 
     async removeStringing(id: string) {
       await db.stringings.delete(id);
-      this.stringings = this.stringings.filter((s) => s.id !== id);
     },
   },
 });
+
+/** 新建上弦草稿的临时 id */
+export function newStringingDraftId(): string {
+  return uid('stringing-new');
+}

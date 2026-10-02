@@ -24,6 +24,8 @@ export interface SoundChamber {
   carver: string;
   /** 备注 */
   remark?: string;
+  /** 乐观锁版本：正式档案每被改写一次 +1；初版旧数据按 1 计 */
+  version: number;
 }
 
 export const POST_POSITIONS: PostPos[] = ['天柱偏左', '天柱中', '天柱偏右', '未定'];

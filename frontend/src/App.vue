@@ -1,26 +1,41 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue';
+import { computed, onMounted, ref } from 'vue';
 import { useRoute } from 'vue-router';
 import { ElMessage } from 'element-plus';
-import { Download } from '@element-plus/icons-vue';
+import { Download, Document } from '@element-plus/icons-vue';
+import { initTabId } from './utils/tab';
 import { seedIfEmpty } from './utils/seed';
 import { downloadText, exportBackupJson } from './utils/export';
 import { useBoardStore } from './stores/boardStore';
 import { useChamberStore } from './stores/chamberStore';
 import { useLacquerStore } from './stores/lacquerStore';
 import { useStringingStore } from './stores/stringingStore';
+import { useDraftStore } from './stores/draftStore';
 
 const route = useRoute();
 const boardStore = useBoardStore();
 const chamberStore = useChamberStore();
 const lacquerStore = useLacquerStore();
 const stringingStore = useStringingStore();
+const draftStore = useDraftStore();
 const ready = ref(false);
+
+/** 仅统计本页签未提交草稿（正式档案的异常/进度不含草稿） */
+const pendingDrafts = computed(() => draftStore.pendingCount);
 
 onMounted(async () => {
   try {
+    // 先认领页签号：草稿按页签隔离，必须早于草稿读写
+    await initTabId();
     await seedIfEmpty();
-    await Promise.all([boardStore.hydrate(), chamberStore.hydrate(), lacquerStore.hydrate(), stringingStore.hydrate()]);
+    const subs = [
+      boardStore.hydrate(),
+      chamberStore.hydrate(),
+      lacquerStore.hydrate(),
+      stringingStore.hydrate(),
+    ];
+    await draftStore.hydrate();
+    await Promise.all(subs.map((sub) => sub.ready));
   } catch (error) {
     ElMessage.error(`本地数据装载失败：${(error as Error).message}`);
   } finally {
@@ -31,7 +46,7 @@ onMounted(async () => {
 async function handleExport() {
   const json = await exportBackupJson();
   downloadText(`gbguqin-backup-${new Date().toISOString().slice(0, 10)}.json`, json);
-  ElMessage.success('已导出 IndexedDB 全量 JSON 备份');
+  ElMessage.success('已导出正式工序档案 JSON 备份（不含页签草稿）');
 }
 </script>
 
@@ -53,12 +68,23 @@ async function handleExport() {
     <el-container>
       <el-header class="app-header">
         <span class="header-title">{{ (route.meta?.title as string) ?? '古琴斫制工序记录台' }}</span>
-        <el-button :icon="Download" @click="handleExport">导出备份</el-button>
+        <div class="header-actions">
+          <el-tooltip
+            v-if="pendingDrafts"
+            placement="bottom"
+            content="本页签有尚未提交的工序草稿，正式档案未受影响；可回到对应页面继续编辑并提交"
+          >
+            <el-tag type="warning" effect="plain" :icon="Document" class="draft-badge">
+              本页草稿 {{ pendingDrafts }} 条待提交
+            </el-tag>
+          </el-tooltip>
+          <el-button :icon="Download" @click="handleExport">导出备份</el-button>
+        </div>
       </el-header>
       <el-main v-loading="!ready" element-loading-text="正在装载本地工序档案…" class="app-main">
         <router-view />
       </el-main>
-      <el-footer class="app-footer">数据保存在浏览器 IndexedDB（gbguqin-db），不依赖后端服务</el-footer>
+      <el-footer class="app-footer">正式工序档案保存在浏览器 IndexedDB（gbguqin-db），草稿按页签单独存放，不依赖后端服务</el-footer>
     </el-container>
   </el-container>
 </template>
@@ -95,6 +121,14 @@ async function handleExport() {
 .header-title {
   font-weight: 600;
   color: #4a3728;
+}
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.draft-badge {
+  cursor: default;
 }
 .app-main {
   background: #f7f3ed;

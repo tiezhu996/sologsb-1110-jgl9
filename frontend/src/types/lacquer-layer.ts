@@ -23,6 +23,8 @@ export interface LacquerLayer {
   operator: string;
   /** 备注 */
   remark?: string;
+  /** 乐观锁版本：正式档案每被改写一次 +1；初版旧数据按 1 计 */
+  version: number;
 }
 
 /** 灰胎阶段常用配比 */
