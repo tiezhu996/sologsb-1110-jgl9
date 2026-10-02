@@ -3,12 +3,15 @@ import type { LacquerLayer } from '../types/lacquer-layer';
 const DAY_MS = 86_400_000;
 
 /** 按遍次升序排序 */
-export function sortLayers(layers: LacquerLayer[]): LacquerLayer[] {
+export function sortLayers<T extends { seq: number }>(layers: T[]): T[] {
   return [...layers].sort((a, b) => a.seq - b.seq);
 }
 
 /** 累计厚度：本遍及之前各遍厚度累加 */
-export function cumulativeThickness(layers: LacquerLayer[], uptoSeq?: number): number {
+export function cumulativeThickness<T extends { seq: number; layerThickness: number }>(
+  layers: T[],
+  uptoSeq?: number,
+): number {
   const limit = uptoSeq ?? Number.POSITIVE_INFINITY;
   const sum = sortLayers(layers)
     .filter((layer) => layer.seq <= limit)
@@ -17,7 +20,7 @@ export function cumulativeThickness(layers: LacquerLayer[], uptoSeq?: number): n
 }
 
 /** 下一遍遍次号 */
-export function nextSeq(layers: LacquerLayer[]): number {
+export function nextSeq(layers: Array<{ seq: number }>): number {
   return layers.reduce((max, layer) => Math.max(max, layer.seq), 0) + 1;
 }
 

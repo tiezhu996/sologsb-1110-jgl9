@@ -24,6 +24,10 @@ export interface SoundChamber {
   carver: string;
   /** 备注 */
   remark?: string;
+  /** 正式档案版本号：每次提交成功 +1，提交时按页面打开时的版本核对冲突 */
+  rev: number;
+  /** 最近一次正式提交时间 ISO */
+  updatedAt: string;
 }
 
 export const POST_POSITIONS: PostPos[] = ['天柱偏左', '天柱中', '天柱偏右', '未定'];

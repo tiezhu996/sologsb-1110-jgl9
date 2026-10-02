@@ -3,19 +3,23 @@ import { db } from '../utils/db';
 import { uid } from '../utils/id';
 import { toPlain } from '../utils/plain';
 import { pairBoards, boardUsable } from '../utils/wood';
-import type { BoardPart, BoardPair, WoodBoard, WoodDefect, WoodGrain, WoodSpecies } from '../types/wood-board';
+import { ConflictError, recordConflict, resolveGuardedMerge } from '../utils/conflict';
+import { boardFormToRecord, FIELD_SPECS } from '../utils/forms';
+import { postBus } from '../utils/bus';
+import type { BoardPair, WoodBoard } from '../types/wood-board';
+import type { BoardDraftForm } from '../types/draft';
 
-export interface BoardInput {
-  boardNo: string;
-  guqinNo: string;
-  part: BoardPart;
-  species: WoodSpecies;
-  dryYears: number;
-  thicknessMm: number;
-  grain: WoodGrain;
-  defect: WoodDefect;
-  receivedAt?: string;
-  remark?: string;
+export interface BoardCommitRequest {
+  mode: 'create' | 'edit';
+  /** edit=板材 id；create=本次登记会话的临时 id */
+  sessionId: string;
+  form: BoardDraftForm;
+  /** 打开编辑时的正式档案快照（基线）；create 为 null */
+  base: WoodBoard | null;
+  /** 冲突重试：逐字段采用哪一方（未选字段不会通过核对） */
+  resolutions?: Record<string, 'ours' | 'theirs'>;
+  /** 冲突重试：上次核对到的对方版本号 */
+  expectedRev?: number;
 }
 
 interface BoardState {
@@ -23,7 +27,7 @@ interface BoardState {
   hydrated: boolean;
 }
 
-/** 板材与面板/底板配对 */
+/** 板材与面板/底板配对（正式工序档案，提交带版本核对） */
 export const useBoardStore = defineStore('board', {
   state: (): BoardState => ({ boards: [], hydrated: false }),
 
@@ -50,49 +54,86 @@ export const useBoardStore = defineStore('board', {
       this.hydrated = true;
     },
 
-    async addBoard(input: BoardInput): Promise<WoodBoard> {
-      const board: WoodBoard = {
-        id: uid('board'),
-        boardNo: input.boardNo.trim(),
-        guqinNo: input.guqinNo.trim(),
-        part: input.part,
-        species: input.species,
-        dryYears: Number(input.dryYears) || 0,
-        thicknessMm: Number(input.thicknessMm) || 0,
-        grain: input.grain,
-        defect: input.defect,
-        receivedAt: input.receivedAt ?? new Date().toISOString(),
-        remark: input.remark?.trim() || undefined,
+    /**
+     * 提交板材草稿到正式档案：
+     * - create：直接新增（板材号各不相同，无自然键冲突）；
+     * - edit：按打开时的 rev 核对，对方页签已提交时做字段级三向比对，
+     *   确实冲突抛 ConflictError（事务回滚，正式档案与草稿均保留，可带选择重试）。
+     */
+    async commitBoard(req: BoardCommitRequest): Promise<WoodBoard> {
+      const rec = boardFormToRecord(req.form) as Record<string, unknown> & {
+        boardNo: string;
+        guqinNo: string;
+        part: WoodBoard['part'];
+        species: WoodBoard['species'];
+        dryYears: number;
+        thicknessMm: number;
+        grain: WoodBoard['grain'];
+        defect: WoodBoard['defect'];
+        receivedAt: string;
+        remark: string;
       };
-      await db.boards.put(toPlain(board));
-      this.boards = [board, ...this.boards];
-      return board;
-    },
+      const specs = FIELD_SPECS.board;
+      let committed!: WoodBoard;
 
-    async updateBoard(id: string, patch: Partial<BoardInput>) {
-      const current = this.boards.find((b) => b.id === id);
-      if (!current) return;
-      const next: WoodBoard = { ...current, ...patch };
-      await db.boards.put(toPlain(next));
-      this.boards = this.boards.map((b) => (b.id === id ? next : b));
+      await db.transaction('rw', db.boards, async () => {
+        const now = new Date().toISOString();
+        if (req.mode === 'create') {
+          const board: WoodBoard = {
+            id: uid('board'),
+            boardNo: rec.boardNo as string,
+            guqinNo: rec.guqinNo as string,
+            part: rec.part,
+            species: rec.species,
+            dryYears: rec.dryYears as number,
+            thicknessMm: rec.thicknessMm as number,
+            grain: rec.grain,
+            defect: rec.defect,
+            receivedAt: rec.receivedAt as string,
+            remark: (rec.remark as string) || undefined,
+            rev: 1,
+            updatedAt: now,
+          };
+          await db.boards.put(toPlain(board));
+          committed = board;
+          return;
+        }
+
+        const current = await db.boards.get(req.sessionId);
+        if (!current) {
+          throw new ConflictError(recordConflict('board', 'record-deleted', 0, '这块板材已被另一个页签删除，正式档案中不存在该记录'));
+        }
+        const base = req.base ?? current;
+        const merged = resolveGuardedMerge('board', specs, base, current, rec, req.resolutions, req.expectedRev);
+
+        const next: WoodBoard = {
+          id: current.id,
+          boardNo: merged.boardNo as string,
+          guqinNo: merged.guqinNo as string,
+          part: merged.part as WoodBoard['part'],
+          species: merged.species as WoodBoard['species'],
+          dryYears: merged.dryYears as number,
+          thicknessMm: merged.thicknessMm as number,
+          grain: merged.grain as WoodBoard['grain'],
+          defect: merged.defect as WoodBoard['defect'],
+          receivedAt: merged.receivedAt as string,
+          remark: (merged.remark as string) || undefined,
+          rev: current.rev + 1,
+          updatedAt: now,
+        };
+        await db.boards.put(toPlain(next));
+        committed = next;
+      });
+
+      this.boards = committed.rev === 1 ? [committed, ...this.boards] : this.boards.map((b) => (b.id === committed.id ? committed : b));
+      postBus({ type: 'archive-committed', at: new Date().toISOString() });
+      return committed;
     },
 
     async removeBoard(id: string) {
       await db.boards.delete(id);
       this.boards = this.boards.filter((b) => b.id !== id);
-    },
-
-    /** 配对绑定：把某块板材与同琴号的另一部位板材绑定 */
-    async pair(panelId: string, baseId: string) {
-      const panel = this.boards.find((b) => b.id === panelId);
-      const base = this.boards.find((b) => b.id === baseId);
-      if (!panel || !base) return;
-      const guqinNo = panel.guqinNo;
-      const updated = [panel, base].map((b) => ({ ...b, guqinNo }));
-      for (const board of updated) {
-        await db.boards.put(toPlain(board));
-      }
-      this.boards = this.boards.map((b) => updated.find((u) => u.id === b.id) ?? b);
+      postBus({ type: 'archive-committed', at: new Date().toISOString() });
     },
   },
 });

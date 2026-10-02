@@ -1,4 +1,9 @@
 import { db, SCHEMA_VERSION } from './db';
+import { normalizeArchives } from './archive';
+import type { WoodBoard } from '../types/wood-board';
+import type { SoundChamber } from '../types/sound-chamber';
+import type { LacquerLayer } from '../types/lacquer-layer';
+import type { Stringing } from '../types/stringing';
 
 export interface BackupPayload {
   app: string;
@@ -58,24 +63,30 @@ export function downloadCsv<T extends Record<string, unknown>>(
   downloadText(filename, `\ufeff${header}\n${body}`, 'text/csv');
 }
 
-/** 恢复 JSON 备份 */
+/** 恢复 JSON 备份（仅正式工序档案；草稿表 drafts 不动，旧版备份缺少 rev 时按初版兼容） */
 export async function importBackup(text: string): Promise<{ boards: number; chambers: number; lacquers: number; stringings: number }> {
   const payload = JSON.parse(text) as Partial<BackupPayload>;
   if (!payload || payload.app !== 'gbguqin') {
     throw new Error('备份文件格式不匹配（缺少 app=gbguqin 标记）');
   }
+  const normalized = normalizeArchives(
+    (payload.boards ?? []) as WoodBoard[],
+    (payload.chambers ?? []) as SoundChamber[],
+    (payload.lacquers ?? []) as LacquerLayer[],
+    (payload.stringings ?? []) as Stringing[],
+  );
   const counts = {
-    boards: payload.boards?.length ?? 0,
-    chambers: payload.chambers?.length ?? 0,
-    lacquers: payload.lacquers?.length ?? 0,
-    stringings: payload.stringings?.length ?? 0,
+    boards: normalized.boards.length,
+    chambers: normalized.chambers.length,
+    lacquers: normalized.lacquers.length,
+    stringings: normalized.stringings.length,
   };
   await db.transaction('rw', db.boards, db.chambers, db.lacquers, db.stringings, async () => {
     await Promise.all([db.boards.clear(), db.chambers.clear(), db.lacquers.clear(), db.stringings.clear()]);
-    if (payload.boards?.length) await db.boards.bulkPut(payload.boards as never[]);
-    if (payload.chambers?.length) await db.chambers.bulkPut(payload.chambers as never[]);
-    if (payload.lacquers?.length) await db.lacquers.bulkPut(payload.lacquers as never[]);
-    if (payload.stringings?.length) await db.stringings.bulkPut(payload.stringings as never[]);
+    if (normalized.boards.length) await db.boards.bulkPut(normalized.boards as never[]);
+    if (normalized.chambers.length) await db.chambers.bulkPut(normalized.chambers as never[]);
+    if (normalized.lacquers.length) await db.lacquers.bulkPut(normalized.lacquers as never[]);
+    if (normalized.stringings.length) await db.stringings.bulkPut(normalized.stringings as never[]);
   });
   return counts;
 }

@@ -3,18 +3,21 @@ import type { WoodBoard } from '../types/wood-board';
 import type { SoundChamber } from '../types/sound-chamber';
 import type { LacquerLayer } from '../types/lacquer-layer';
 import type { Stringing } from '../types/stringing';
+import type { ProcessDraft } from '../types/draft';
 
 /** IndexedDB 库名（浏览器本地存储，无后端） */
 export const DB_NAME = 'gbguqin-db';
 
 /** 当前 schema 版本，与 db.version(n) 对应 */
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 class GuqinDB extends Dexie {
   boards!: Table<WoodBoard, string>;
   chambers!: Table<SoundChamber, string>;
   lacquers!: Table<LacquerLayer, string>;
   stringings!: Table<Stringing, string>;
+  /** 工序草稿：仅按页签隔离保存，不属于正式工序档案，首页/导出/异常均不读取 */
+  drafts!: Table<ProcessDraft, string>;
   meta!: Table<{ key: string; value: string }, string>;
 
   constructor() {
@@ -48,6 +51,35 @@ class GuqinDB extends Dexie {
               row.layerThickness = row.totalThickness;
             }
           });
+      });
+
+    // v3：正式工序档案（板材/槽腹/髹漆/上弦）增加 rev 版本号，提交时按页面打开时的版本核对；
+    // 新增 drafts 表单独保存各页签的工序草稿，不与正式档案混放。旧数据按初版 rev=1 兼容。
+    this.version(3)
+      .stores({
+        boards: 'id, boardNo, guqinNo, part, species, grain, receivedAt',
+        chambers: 'id, guqinNo, postPos, carvedAt',
+        lacquers: 'id, guqinNo, seq, [guqinNo+seq], appliedAt',
+        stringings: 'id, guqinNo, stringType, strungAt',
+        drafts: 'id, tabId, kind, guqinNo, [tabId+kind], updatedAt',
+        meta: 'key',
+      })
+      .upgrade(async (tx) => {
+        // 旧档案没有版本号，按初版 rev=1 兼容；updatedAt 回填为原施工/入库时间
+        const stamp = (row: { rev?: number; updatedAt?: string }, tsField: string) => {
+          if (!Number.isFinite(Number(row.rev)) || Number(row.rev) <= 0) {
+            row.rev = 1;
+          }
+          if (!row.updatedAt) {
+            row.updatedAt = (row as unknown as Record<string, string>)[tsField] ?? new Date().toISOString();
+          }
+        };
+        await Promise.all([
+          tx.table('boards').toCollection().modify((row: WoodBoard) => stamp(row, 'receivedAt')),
+          tx.table('chambers').toCollection().modify((row: SoundChamber) => stamp(row, 'carvedAt')),
+          tx.table('lacquers').toCollection().modify((row: LacquerLayer) => stamp(row, 'appliedAt')),
+          tx.table('stringings').toCollection().modify((row: Stringing) => stamp(row, 'strungAt')),
+        ]);
       });
   }
 }

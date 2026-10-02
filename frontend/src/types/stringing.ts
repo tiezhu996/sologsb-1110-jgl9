@@ -41,6 +41,10 @@ export interface Stringing {
   operator: string;
   /** 历次评语版本（倒序，最新在前） */
   noteVersions: ToneVersion[];
+  /** 正式档案版本号：每次提交成功 +1，提交时按页面打开时的版本核对冲突 */
+  rev: number;
+  /** 最近一次正式提交时间 ISO */
+  updatedAt: string;
 }
 
 /** 三段评语 + 九德的编辑草稿 */

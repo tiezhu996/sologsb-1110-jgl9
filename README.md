@@ -49,13 +49,14 @@ npm run build    # 类型检查 + 生产构建
 │   ├── nginx.conf             # try_files SPA 回退 + gzip
 │   ├── public/favicon.svg
 │   └── src/
-│       ├── types/             # wood-board / sound-chamber / lacquer-layer / stringing（+ ui.ts）
-│       ├── stores/            # boardStore / chamberStore / lacquerStore / stringingStore
-│       ├── components/common/ # DimensionChart / LayerStack / ToneTextEditor / FilterBar / StatBadge / ProcessTimeline / EmptyPanel
-│       ├── hooks/             # useGuqinFilter / useStageProgress
+│       ├── types/             # wood-board / sound-chamber / lacquer-layer / stringing（+ ui.ts / draft.ts）
+│       ├── stores/            # board / chamber / lacquer / stringing（正式档案）+ draftStore（页签草稿）
+│       ├── components/common/ # DimensionChart / LayerStack / ToneTextEditor / FilterBar / StatBadge / ProcessTimeline / EmptyPanel / ConflictDialog / DraftInbox
+│       ├── hooks/             # useGuqinFilter / useStageProgress / useFormDraft / useArchiveSync
 │       ├── pages/             # WorkshopBoard / BoardList / ChamberEditor / LacquerLedger / StringingLog（+ NotFound）
 │       ├── router/index.ts    # 路由表
-│       └── utils/             # layer.ts / db.ts / export.ts（+ wood.ts / seed.ts / id.ts）
+│       └── utils/             # layer / db / export / conflict / forms / archive / bus / tab（+ wood / seed / id / plain）
+│   └── scripts/verify-conflicts.ts # 并发版本核对的事务级验证（npm run verify:conflicts）
 ```
 
 ## 功能与路由
@@ -70,7 +71,12 @@ npm run build    # 类型检查 + 生产构建
 
 ## 数据存储说明
 
-- 全部数据存于浏览器 IndexedDB（Dexie，库名 `gbguqin-db`），表：`boards`、`chambers`、`lacquers`、`stringings`、`meta`。
-- `db.version(1)` 建表声明索引；`db.version(2).upgrade(...)` 为髹漆表增加 `[guqinNo+seq]` 复合索引并回填历史厚度。升级前可用顶栏「导出备份」导出全量 JSON。
+- 全部数据存于浏览器 IndexedDB（Dexie，库名 `gbguqin-db`），表：`boards`、`chambers`、`lacquers`、`stringings`（四张正式工序档案表）、`drafts`（页签工序草稿）、`meta`。
+- **正式档案与草稿分开保存**：四个登记弹窗里的填写内容只写入 `drafts` 表，按浏览器页签（tabId）隔离——同机两个页签同编同一张琴互不覆盖，刷新本页签可恢复，顶栏「本页签草稿」可继续编辑或丢弃；只有点「提交到正式档案」且通过版本核对后才写入四张正式表。
+- **提交版本核对（乐观锁）**：每条正式档案带 `rev` 版本号，提交时按页面打开时的版本做三向比对：双方改不同字段自动合并；同一字段都改且改得不同才弹冲突核对，列出「打开时值 / 对方页签已保存 / 本页签草稿」，逐项选择采用方后可重试；记录被另一页签删除、槽腹/上弦改填的琴号已被占用也会拦截。核对在 Dexie 事务内完成，写入失败时正式档案回滚、草稿原样保留，可重试。
+- 另一个页签提交成功后，本页签经 BroadcastChannel 自动重新装载正式档案（跨浏览器/跨设备仍各自独立，纯本地无后端）。
+- **首页进度、导出备份、荫房异常等统计只认四张正式表**，`drafts` 不进备份、不进统计。
+- `db.version(1)` 建表声明索引；`db.version(2)` 为髹漆表增加 `[guqinNo+seq]` 复合索引并回填历史厚度；`db.version(3)` 为四张正式表增加 `rev/updatedAt`、新增 `drafts` 表，旧数据按初版 `rev=1` 兼容，旧版 JSON 备份恢复时同样自动补版。升级前可用顶栏「导出备份」导出全量 JSON。
+- 并发核对可用 `npm run verify:conflicts`（基于 fake-indexeddb 的事务级验证）回归。
 - 首次打开且表为空时写入一批示例工序档案（`src/utils/seed.ts`）。
 - 容器无状态：不使用数据库服务、不挂载命名卷，`docker compose down` 后数据仍留在浏览器中。

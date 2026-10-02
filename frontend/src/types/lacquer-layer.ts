@@ -23,6 +23,10 @@ export interface LacquerLayer {
   operator: string;
   /** 备注 */
   remark?: string;
+  /** 正式档案版本号：每次提交成功 +1，提交时按页面打开时的版本核对冲突 */
+  rev: number;
+  /** 最近一次正式提交时间 ISO */
+  updatedAt: string;
 }
 
 /** 灰胎阶段常用配比 */

@@ -9,18 +9,31 @@ import { useBoardStore } from './stores/boardStore';
 import { useChamberStore } from './stores/chamberStore';
 import { useLacquerStore } from './stores/lacquerStore';
 import { useStringingStore } from './stores/stringingStore';
+import { useDraftStore } from './stores/draftStore';
+import { useArchiveSync } from './hooks/useArchiveSync';
+import DraftInbox from './components/common/DraftInbox.vue';
 
 const route = useRoute();
 const boardStore = useBoardStore();
 const chamberStore = useChamberStore();
 const lacquerStore = useLacquerStore();
 const stringingStore = useStringingStore();
+const draftStore = useDraftStore();
 const ready = ref(false);
+
+// 其他页签提交正式档案后，本页签自动重新装载四张正式表（草稿不受影响）
+useArchiveSync();
 
 onMounted(async () => {
   try {
     await seedIfEmpty();
-    await Promise.all([boardStore.hydrate(), chamberStore.hydrate(), lacquerStore.hydrate(), stringingStore.hydrate()]);
+    await Promise.all([
+      boardStore.hydrate(),
+      chamberStore.hydrate(),
+      lacquerStore.hydrate(),
+      stringingStore.hydrate(),
+      draftStore.hydrate(),
+    ]);
   } catch (error) {
     ElMessage.error(`本地数据装载失败：${(error as Error).message}`);
   } finally {
@@ -29,9 +42,10 @@ onMounted(async () => {
 });
 
 async function handleExport() {
+  // 导出备份只认正式工序档案（boards/chambers/lacquers/stringings），不含任何页签草稿
   const json = await exportBackupJson();
   downloadText(`gbguqin-backup-${new Date().toISOString().slice(0, 10)}.json`, json);
-  ElMessage.success('已导出 IndexedDB 全量 JSON 备份');
+  ElMessage.success('已导出正式工序档案 JSON 备份（不含页签草稿）');
 }
 </script>
 
@@ -53,12 +67,15 @@ async function handleExport() {
     <el-container>
       <el-header class="app-header">
         <span class="header-title">{{ (route.meta?.title as string) ?? '古琴斫制工序记录台' }}</span>
-        <el-button :icon="Download" @click="handleExport">导出备份</el-button>
+        <div class="header-actions">
+          <DraftInbox />
+          <el-button :icon="Download" @click="handleExport">导出备份</el-button>
+        </div>
       </el-header>
       <el-main v-loading="!ready" element-loading-text="正在装载本地工序档案…" class="app-main">
         <router-view />
       </el-main>
-      <el-footer class="app-footer">数据保存在浏览器 IndexedDB（gbguqin-db），不依赖后端服务</el-footer>
+      <el-footer class="app-footer">正式档案与页签草稿分开保存在浏览器 IndexedDB（gbguqin-db），不依赖后端服务</el-footer>
     </el-container>
   </el-container>
 </template>
@@ -95,6 +112,11 @@ async function handleExport() {
 .header-title {
   font-weight: 600;
   color: #4a3728;
+}
+.header-actions {
+  display: flex;
+  gap: 10px;
+  align-items: center;
 }
 .app-main {
   background: #f7f3ed;

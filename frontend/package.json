@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "vue-tsc --noEmit && vite build",
-    "preview": "vite preview --port 21810"
+    "preview": "vite preview --port 21810",
+    "verify:conflicts": "node -e \"const esbuild=require('esbuild');esbuild.build({entryPoints:['scripts/verify-conflicts.ts'],bundle:true,platform:'node',format:'cjs',outfile:'scripts/.verify-tmp.cjs',logLevel:'warning'}).then(()=>console.log('bundled')).catch(e=>{console.error(e);process.exit(1)})\" && node scripts/.verify-tmp.cjs; status=$?; rm -f scripts/.verify-tmp.cjs; exit $status"
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.1",
@@ -19,6 +20,7 @@
   "devDependencies": {
     "@types/node": "^22.10.5",
     "@vitejs/plugin-vue": "^5.2.1",
+    "fake-indexeddb": "^6.2.5",
     "typescript": "~5.7.3",
     "vite": "^6.1.0",
     "vue-tsc": "^2.2.0"
